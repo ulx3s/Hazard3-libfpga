@@ -26,6 +26,9 @@ module ahb_cache_writeback #(
 	parameter W_LINE = W_DATA,
 	parameter TMEM_PRELOAD = "",
 	parameter DMEM_PRELOAD = "",
+`ifdef HAS_REGISTERED_READ_HITS
+	parameter REGISTERED_READ_HITS = 0,
+`endif
 	parameter DEPTH =  256 // Capacity in bits = W_LINE * N_WAYS * DEPTH
 ) (
 	// Globals
@@ -148,7 +151,11 @@ always @ (posedge clk or negedge rst_n) begin
 		end
 		S_READ_CHECK: begin
 			if (cache_hit)
+`ifdef HAS_REGISTERED_READ_HITS
+				cache_state <= REGISTERED_READ_HITS ? S_READ_DONE : s_next_or_idle;
+`else
 				cache_state <= s_next_or_idle;
+`endif
 			else if (cache_dirty)
 				cache_state <= BURST_SIZE > 1 ? S_READ_CLEAN_BURST : S_READ_CLEAN_LAST;
 			else
@@ -174,7 +181,13 @@ always @ (posedge clk or negedge rst_n) begin
 		end
 		S_WRITE_CHECK: begin
 			if (cache_hit) begin
+`ifdef HAS_REGISTERED_READ_HITS
+				if (REGISTERED_READ_HITS) begin
+					cache_state <= S_WRITE_DONE;
+				end else if (!cache_dirty) begin
+`else
 				if (!cache_dirty) begin
+`endif
 					// Tag memory needs writing, so can't accept new address phase this cycle.
 					cache_state <= S_WRITE_DONE;
 				end else if (src_aphase_read) begin
@@ -401,7 +414,7 @@ wire cache_wen_fill = dst_hready && (
 
 // Then wire up cache signals using these.
 
-assign cache_t_addr = 
+assign cache_t_addr =
 	maybe_modify_cache && !(cache_hit && cache_dirty) ? src_addr_dphase :
 	dst_dphase_active                                 ? burst_fill_addr_dphase :
 	cache_state == S_WRITE2READ_STALL                 ? src_addr_dphase : src_haddr;
@@ -517,14 +530,35 @@ reg [W_DATA-1:0] dst_hrdata_reg;
 always @ (posedge clk or negedge rst_n) begin
 	if (!rst_n) begin
 		dst_hrdata_reg <= {W_DATA{1'b0}};
+`ifdef HAS_REGISTERED_READ_HITS
+	end else if (REGISTERED_READ_HITS && cache_state == S_READ_CHECK) begin
+		dst_hrdata_reg <= cache_rdata;
+`endif
 	end else if (dst_hready && (dst_dphase_addr_matches_src_addr || cache_state == S_UREAD_DPH)) begin
 		dst_hrdata_reg <= dst_hrdata;
 	end
 end
 
+`ifdef HAS_REGISTERED_READ_HITS
+assign src_hrdata = REGISTERED_READ_HITS ||
+	cache_state == S_READ_DONE || cache_state == S_UREAD_DONE
+	? dst_hrdata_reg : cache_rdata;
+`else
 assign src_hrdata = cache_state == S_READ_DONE || cache_state == S_UREAD_DONE
 	? dst_hrdata_reg : cache_rdata;
+`endif
 
+`ifdef HAS_REGISTERED_READ_HITS
+assign src_hready_resp =
+	cache_state == S_IDLE ||
+	cache_state == S_READ_CHECK && cache_hit && !REGISTERED_READ_HITS ||
+	cache_state == S_READ_DONE ||
+	cache_state == S_WRITE_CHECK && cache_hit && cache_dirty && !REGISTERED_READ_HITS ||
+	cache_state == S_WRITE_DONE ||
+	cache_state == S_UREAD_DONE ||
+	cache_state == S_UWRITE_DONE ||
+	cache_state == S_ERR_PH1;
+`else
 assign src_hready_resp =
 	cache_state == S_IDLE ||
 	cache_state == S_READ_CHECK && cache_hit ||
@@ -534,6 +568,7 @@ assign src_hready_resp =
 	cache_state == S_UREAD_DONE ||
 	cache_state == S_UWRITE_DONE ||
 	cache_state == S_ERR_PH1;
+`endif
 
 assign src_hresp = cache_state == S_ERR_PH0 || cache_state == S_ERR_PH1;
 
